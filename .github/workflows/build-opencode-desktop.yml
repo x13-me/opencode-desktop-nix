@@ -1,0 +1,39 @@
+name: Build OpenCode Desktop
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.package }} (${{ matrix.system }})
+    strategy:
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+            package: opencode-desktop
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+            package: opencode-desktop
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@main
+
+      - name: Setup FlakeHub cache
+        uses: DeterminateSystems/flakehub-cache-action@main
+
+      - name: Setup cachix
+        uses: cachix/cachix-action@v17
+        with:
+          name: x13
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Build
+        run: nix build ".#${{ matrix.package }}"
