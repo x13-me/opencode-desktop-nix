@@ -1,14 +1,14 @@
 # Machine-updated by .github/update-opencode-desktop.sh — do not edit by hand.
 {
-  version = "2.0.27";
+  version = "2.0.28";
   systems = {
     x86_64-linux = {
       arch = "amd64";
-      deb = "sha256-JWvYf/lsmFlkLPVf698MkYmLKHXDNU6T045FMVObV9s=";
+      deb = "sha256-EEXIrZW+dmalDChyVjXVF4L5WsaMgkhy5bB/0WYEDng=";
     };
     aarch64-linux = {
       arch = "arm64";
-      deb = "sha256-BgwS4/unN26nWm5kCvOKddQdt73t1EgrKh/e2gLdss0=";
+      deb = "sha256-QbBmMSjS+kLTCgyH81tPk7bZ9Ci+EjrAG7WHapckeX0=";
     };
   };
 }
