@@ -6,9 +6,9 @@
 # sidecar. Everything below is packaging only:
 #
 #   * `autoPatchelfHook` resolves the deb's DT_NEEDED libraries into
-#     store RPATHs. `libffmpeg.so` stays bundled next to the binary and is
-#     found through the `$ORIGIN` RPATH upstream already ships (re-asserted
-#     in `postFixup`, because patchelf would otherwise replace it).
+#     store RPATHs, with `$ORIGIN` appended so `libffmpeg.so` — bundled
+#     next to the binary and found through the RPATH upstream already
+#     ships — still resolves.
 #   * The four libraries Electron `dlopen()`s rather than links
 #     (`libnotify`, `libsecret`, `libpulseaudio`, `speech-dispatcher`,
 #     `pipewire`) go on the wrapper's `LD_LIBRARY_PATH` instead — see the
@@ -191,9 +191,11 @@ stdenv.mkDerivation {
       desktopName = "OpenCode";
       comment = "Open source AI coding agent";
       exec = "opencode-desktop %U";
-      # Icon name matches the installed `hicolor/*/apps/ai.opencode.desktop.png`
-      # and the window's `WM_CLASS`, so the launcher and the taskbar agree.
-      icon = "ai.opencode.desktop";
+      # Icon name must match what the deb actually ships (see the install
+      # loop below): upstream renamed its icons to `ai.opencode.png` in
+      # 2.1.4, so referencing the old `*.desktop`-suffixed name would leave
+      # the launcher icon unresolved.
+      icon = "ai.opencode";
       startupWMClass = "ai.opencode.desktop";
       categories = [ "Development" ];
       mimeTypes = [ "x-scheme-handler/opencode" ];
@@ -208,6 +210,17 @@ stdenv.mkDerivation {
 
     mkdir -p $out/libexec/opencode-desktop
     cp -r "$payload"/opt/OpenCode/. $out/libexec/opencode-desktop/
+
+    # Upstream owns the Electron binary's name and has already renamed it
+    # once (`ai.opencode.desktop` → `ai.opencode` in 2.1.4), so ask the
+    # deb's own desktop file (`Exec=/opt/OpenCode/<name>`) for the name
+    # instead of assuming it. The variable survives into postFixup, which
+    # needs the same path to patch the RPATH post autoPatchelfHook.
+    launchline=$(grep -m1 -s '^Exec=' "$payload"/usr/share/applications/ai.opencode.desktop.desktop) || {
+      die "no Exec= entry in the deb's ai.opencode.desktop.desktop; cannot locate the Electron binary"
+    }
+    opencodeBin=$(basename "''${launchline#Exec=}")
+    opencodeBin=''${opencodeBin%% *}
 
     # SUID chrome-sandbox is impossible in the read-only store; Chromium
     # falls back to its user-namespace sandbox, which nixpkgs enables by
@@ -226,10 +239,15 @@ stdenv.mkDerivation {
       "$payload"/usr/share/metainfo/ai.opencode.desktop.metainfo.xml \
       $out/share/metainfo/ai.opencode.desktop.metainfo.xml
 
-    for size in 32 64 128; do
-      install -Dm444 \
-        "$payload"/usr/share/icons/hicolor/''${size}x''${size}/apps/ai.opencode.desktop.png \
-        $out/share/icons/hicolor/''${size}x''${size}/apps/ai.opencode.desktop.png
+    # Upstream renamed the app icons to `ai.opencode.png` between 2.1.3 and
+    # 2.1.4, so icon sizes and names in this subtree cannot be assumed. Grab
+    # every PNG the deb ships and mirror its hicolor path into the output,
+    # rather than hard-coding `32 64 128` under the old `*.desktop` name.
+    for icon in "$payload"/usr/share/icons/hicolor/*/apps/*.png; do
+      [ -e "$icon" ] || continue
+      granularity=$(basename "$(dirname "$(dirname "$icon")")")
+      install -Dm444 "$icon" \
+        "$out/share/icons/hicolor/$granularity/apps/$(basename "$icon")"
     done
 
     # Point GTK at OUR gtk3's module dir rather than the system-wide
@@ -246,7 +264,7 @@ stdenv.mkDerivation {
     # comment in a backslash-continued command -- the line gets parsed as a
     # command and the remaining wrapper flags get executed.
     makeWrapper \
-      $out/libexec/opencode-desktop/ai.opencode.desktop \
+      "$out/libexec/opencode-desktop/$opencodeBin" \
       $out/bin/opencode-desktop \
       --inherit-argv0 \
       --set GTK_PATH "${gtk3}/lib/gtk-3.0" \
@@ -256,15 +274,13 @@ stdenv.mkDerivation {
     runHook postInstall
   '';
 
-  postFixup = ''
-    # Upstream ships `RPATH=$ORIGIN` so `libffmpeg.so` (DT_NEEDED, bundled
-    # next to the binary, no version suffix) resolves. `autoPatchelfHook`
-    # rewrites that entry; put it back so the bundled codec library is still
-    # found. `--add-rpath` appends rather than replacing, and keeps the
-    # existing DT_RPATH tag, which — unlike DT_RUNPATH — is also honoured
-    # for transitive lookups.
-    patchelf --add-rpath '$ORIGIN' $out/libexec/opencode-desktop/ai.opencode.desktop
-  '';
+  # autoPatchelfHook's python rewrite replaces the RPATH with absolute
+  # store paths *after* postFixup, so a `patchelf --add-rpath $ORIGIN` in
+  # postFixup is clobbered again. Ask the hook itself to append `$ORIGIN`
+  # to whatever RPATH it computes: `libffmpeg.so` (DT_NEEDED, bundled next
+  # to the binary, no version suffix) must stay resolvable after the
+  # bundle is copied out of its `$ORIGIN`-relative home.
+  appendRunpaths = [ "$ORIGIN" ];
 
   meta = {
     description = "AI coding agent desktop client (Electron)";
