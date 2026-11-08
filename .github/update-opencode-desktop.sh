@@ -12,19 +12,22 @@
 # Upstream-specific deviation. Helium resolves its version from the GitHub
 # releases API, but OpenCode publishes no GitHub releases for the 2.x desktop
 # line (anomalyco/opencode tags stop at v1.x, whose desktop artifact is a
-# different, older build). The 2.x line is published only on opencode.ai,
-# where `https://opencode.ai/update/api/latest/desktop/opencode` answers
-# `{"error code: 1101}`. The one machine-readable version source is the
-# `Location` header of the stable channel redirect, so that is what
-# `get_latest_version` reads here. Two consequences:
+# different, older build). The 2.x line is published only on opencode.ai.
+# The one machine-readable version source is the redirect chain from the stable
+# channel: it now 302s through an update API hop to
+# `.../files/bin/<version>/...`, and that `/files/bin/<version>/` segment is
+# what `get_latest_version` parses. The intermediate hop rejects HEAD (405),
+# so the check follows the chain with a GET range request (`curl -sS -D- -o
+# /dev/null -r 0-0 -L`) rather than `-I`. Two consequences:
 #   * `parse_field` is dropped. It exists only to pull a field out of a GitHub
 #     JSON body that may embed raw newlines (which would make the body
-#     invalid JSON for `jq`); a redirect header has no such problem and is
+#     invalid JSON for `jq`); redirect headers have no such problem and are
 #     parsed with `sed` instead.
-#   * with_retry keys off a missing `location:` header rather than GitHub's
-#     "Not Found" body. The stable endpoint intermittently answers 500 to
-#     HEAD (observed in practice), so retrying is what makes the check
-#     reliable rather than falsely reporting "already up to date".
+#   * `with_retry` keys off a missing `/files/bin/` location in the collected
+#     headers rather than GitHub's "Not Found" body. The stable endpoint
+#     intermittently fails to resolve (observed in practice), so retrying is
+#     what makes the check reliable rather than falsely reporting "already up
+#     to date".
 #
 # versions.nix stays the sole version source.
 
@@ -53,18 +56,20 @@ with_retry() {
         output=$("$@" 2>&1)
         status=$?
 
-        # `curl -I` against the stable channel: success is a 3xx carrying a
-        # `location:` header. A missing one means the redirect is not
-        # resolving yet (a new release mid-publish), so retry rather than
-        # report a bogus "up to date".
-        if echo "$output" | grep -qiE '^location:'; then
+        # `curl -sS -D- -o /dev/null -r 0-0 -L` against the stable channel:
+        # success is a redirect chain whose collected headers carry a
+        # `Location:` pointing at `/files/bin/<version>/...`. A missing one
+        # means the redirect is not resolving yet (a new release mid-publish),
+        # so retry rather than report a bogus "up to date". The intermediate
+        # hop rejects HEAD (405), so the caller uses a GET range request.
+        if echo "$output" | grep -qE '/files/bin/[^/]+/'; then
             echo "[TRACE] [cmd=$*] output: $output" 1>&2
             echo "$output" | tr -d '\000-\037'
             return $status
         fi
 
         count=$((count + 1))
-        echo "attempt $count/$retries: no 'location:' header in redirect, retrying..." >&2
+        echo "attempt $count/$retries: no '/files/bin/' location in redirect chain, retrying..." >&2
         sleep 1
     done
 
@@ -72,13 +77,16 @@ with_retry() {
     exit 1
 }
 
-# The stable channel 302s to
-# https://opencode.ai/files/bin/<version>/opencode-desktop-linux-amd64.deb
-# on every published release, so the version is the path segment between
-# `files/bin/` and the filename.
+# The stable channel now 302s through an update API hop:
+#   $download_base/linux-x64-deb
+#     -> https://opencode.ai/update/api/latest/desktop/opencode/opencode-desktop-linux-amd64.deb
+#     -> https://opencode.ai/files/bin/<version>/opencode-desktop-linux-amd64.deb
+# The intermediate hop rejects HEAD (405), so we follow the chain with a GET
+# range request and parse the version from the `/files/bin/<version>/` segment
+# present in the collected redirect headers.
 get_latest_version() {
     echo "RESOLVING STABLE CHANNEL REDIRECT" 1>&2
-    headers=$(with_retry curl -sSI "$download_base/linux-x64-deb")
+    headers=$(with_retry curl -sS -D- -o /dev/null -r 0-0 -L "$download_base/linux-x64-deb")
 
     version=$(echo "$headers" | sed -n 's|.*/files/bin/\([^/]*\)/.*|\1|p' | head -1 | tr -d '\r\n')
 
